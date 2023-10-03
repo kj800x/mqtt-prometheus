@@ -1,5 +1,5 @@
 {
-  "name": "weatherflow-tempest-sensor",
+  "name": "mqtt-prometheus",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -12,8 +12,7 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@influxdata/influxdb-client": "^1.33.2",
-    "node-fetch": "^3.3.0",
+    "mqtt": "^5.0.5",
     "prom-client": "^14.2.0"
   }
 }

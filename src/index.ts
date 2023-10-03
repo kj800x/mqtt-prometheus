@@ -1,7 +1,6 @@
 import client from "prom-client";
 import http from "http";
-import dgram from "dgram";
-import { DecodedEvent, Event, decodeEvent } from "./weatherflow.js";
+import mqtt from "mqtt";
 
 const metricsServer = http.createServer((__req, res) => {
   res.setHeader("Content-Type", client.register.contentType);
@@ -13,113 +12,56 @@ const metricsServer = http.createServer((__req, res) => {
 
 metricsServer.listen(8080, "0.0.0.0");
 
-const wind_lull = new client.Gauge({ name: "wind_lull", help: "wind_lull" });
-const wind_avg = new client.Gauge({ name: "wind_avg", help: "wind_avg" });
-const wind_gust = new client.Gauge({ name: "wind_gust", help: "wind_gust" });
-const wind_direction = new client.Gauge({
-  name: "wind_direction",
-  help: "wind_direction",
-});
-const wind_sample_interval = new client.Gauge({
-  name: "wind_sample_interval",
-  help: "wind_sample_interval",
-});
-const station_pressure = new client.Gauge({
-  name: "station_pressure",
-  help: "station_pressure",
-});
-const air_temperature = new client.Gauge({
-  name: "air_temperature",
-  help: "air_temperature",
-});
-const relative_humidity = new client.Gauge({
-  name: "relative_humidity",
-  help: "relative_humidity",
-});
-const illuminance = new client.Gauge({
-  name: "illuminance",
-  help: "illuminance",
-});
-const uv = new client.Gauge({ name: "uv", help: "uv" });
-const solar_radiation = new client.Gauge({
-  name: "solar_radiation",
-  help: "solar_radiation",
-});
-const rain_amount = new client.Gauge({
-  name: "rain_amount",
-  help: "rain_amount",
-});
-const precipitation_type = new client.Gauge({
-  name: "precipitation_type",
-  help: "precipitation_type",
-});
-const lighting_count = new client.Gauge({
-  name: "lighting_count",
-  help: "lighting_count",
-});
-const lighting_avg_distance = new client.Gauge({
-  name: "lighting_avg_distance",
-  help: "lighting_avg_distance",
-});
-const battery = new client.Gauge({ name: "battery", help: "battery" });
-const reportInterval = new client.Gauge({
-  name: "reportInterval",
-  help: "reportInterval",
-});
+const mqttClient = mqtt.connect("mqtt://10.60.1.15:1883");
+mqttClient.subscribe("#"); // All
 
-const server = dgram.createSocket("udp4");
+const metrics: { [guageKey: string]: client.Gauge<"room"> } = {};
+const metricRooms: [string, string][] = [];
+const lastUpdate: { [string: string]: number } = {};
 
-async function submitEvent(event: DecodedEvent) {
-  // Special casing this because this event might generate multiple points
-  if (event.type === "obs_st") {
-    const obs = event.observations[event.observations.length - 1]!;
-    wind_lull.set(obs.windLull);
-    wind_avg.set(obs.windAvg);
-    wind_gust.set(obs.windGust);
-    wind_direction.set(obs.windDirection);
-    wind_sample_interval.set(obs.windSampleInterval);
-    station_pressure.set(obs.stationPressure);
-    air_temperature.set(obs.temperature);
-    relative_humidity.set(obs.humidity);
-    illuminance.set(obs.illuminance);
-    uv.set(obs.uvIndex);
-    solar_radiation.set(obs.solarRadiation);
-    rain_amount.set(obs.rainAmount);
-    precipitation_type.set(
-      (() => {
-        switch (obs.precipitationType) {
-          case "none":
-            return 0;
-          case "rain":
-            return 1;
-          case "hail":
-            return 2;
-        }
-      })()
-    );
-    lighting_count.set(obs.lightningCount);
-    lighting_avg_distance.set(obs.lightningAvgDistance);
-    battery.set(obs.battery);
-    reportInterval.set(obs.reportInterval);
+function getMetric(name: string) {
+  if (!(name in metrics)) {
+    metrics[name] = new client.Gauge({
+      name: name,
+      help: name,
+      labelNames: ["room"] as const,
+    });
   }
+  return metrics[name]!;
 }
 
-server.on("error", (err) => {
-  console.log(`server error:\n${err.stack}`);
-  server.close();
+function logMetric(name: string, room: string, value: number) {
+  getMetric(`mqtt_${name}`).set({ room }, value);
+  if (!metricRooms.some((entry) => entry[0] === name && entry[1] === room)) {
+    metricRooms.push([name, room]);
+  }
+  lastUpdate[`mqtt_${name}_${room}`] = new Date().getTime();
+}
+
+mqttClient.on("message", (topic, message) => {
+  const topicParts = topic.split("/");
+  if (topicParts[0] === "ESP32Env" && topicParts.length === 3) {
+    const room = topicParts[1]!;
+    const name = topicParts[2]!;
+    logMetric(name, room, parseFloat(message.toString()));
+  }
 });
 
-server.on("message", (msg, rinfo) => {
-  console.log(`received message from ${rinfo.address}:${rinfo.port}: ${msg}`);
+// Remove a metric if we haven't seen an update in this amount of time
+const WATCHDOG_INTERVAL = 30_000;
 
-  const rawMessage: Event = JSON.parse(msg.toString("utf8"));
-  const decoded = decodeEvent(rawMessage);
-  submitEvent(decoded);
-});
+setInterval(() => {
+  for (const entry of [...metricRooms]) {
+    const name = entry[0];
+    const room = entry[1];
 
-server.on("listening", () => {
-  const address = server.address();
-  console.log(`server listening ${address.address}:${address.port}`);
-});
-
-server.bind(50222);
+    if (
+      new Date().getTime() - lastUpdate[`mqtt_${name}_${room}`]! >
+      WATCHDOG_INTERVAL
+    ) {
+      getMetric(`mqtt_${name}`).remove({ room });
+      metricRooms.splice(metricRooms.indexOf(entry), 1);
+      delete lastUpdate[`mqtt_${name}_${room}`];
+    }
+  }
+}, WATCHDOG_INTERVAL);
