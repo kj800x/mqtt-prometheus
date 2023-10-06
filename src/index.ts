@@ -18,9 +18,11 @@ mqttClient.subscribe("#"); // All
 const metrics: { [guageKey: string]: client.Gauge<"room"> } = {};
 const currentMetrics: { [guageKey: string]: client.Gauge<"port"> } = {};
 const lineMetrics: { [guageKey: string]: client.Gauge } = {};
+const waterMetrics: { [guageKey: string]: client.Gauge } = {};
 const metricRooms: [string, string][] = [];
 const currentMetricRooms: [string, string][] = [];
 const lineMetricsList: string[] = [];
+const waterMetricsList: string[] = [];
 const lastUpdate: { [string: string]: number } = {};
 
 function getMetric(name: string) {
@@ -55,6 +57,16 @@ function getLineMetric(name: string) {
   return lineMetrics[name]!;
 }
 
+function getWaterMetric(name: string) {
+  if (!(name in waterMetrics)) {
+    waterMetrics[name] = new client.Gauge({
+      name: name,
+      help: name,
+    });
+  }
+  return waterMetrics[name]!;
+}
+
 function logMetric(name: string, room: string, value: number) {
   getMetric(`mqtt_${name}`).set({ room }, value);
   if (!metricRooms.some((entry) => entry[0] === name && entry[1] === room)) {
@@ -81,6 +93,39 @@ function logLineMetric(name: string, value: number) {
   lastUpdate[`mqtt_energy_${name}`] = new Date().getTime();
 }
 
+function logWaterMetric(name: string, value: number) {
+  getWaterMetric(`mqtt_water_${name}`).set(value);
+  if (!waterMetricsList.some((entry) => entry === name)) {
+    waterMetricsList.push(name);
+  }
+  lastUpdate[`mqtt_water_${name}`] = new Date().getTime();
+}
+
+interface LinkTapUpdate {
+  dev_id: string;
+  plan_mode: number;
+  plan_sn: number;
+  is_rf_linked: "ON" | "OFF";
+  is_flm_plugin: "ON" | "OFF";
+  is_fall: "ON" | "OFF";
+  is_broken: "ON" | "OFF";
+  is_cutoff: "ON" | "OFF";
+  is_leak: "ON" | "OFF";
+  is_clog: "ON" | "OFF";
+  signal: number; // 0-100 naturals
+  battery: number; // 0-100 naturals
+  child_lock: number; // probably just 0 or 1?
+  is_manual_mode: "ON" | "OFF";
+  is_watering: "ON" | "OFF";
+  is_final: "ON" | "OFF";
+  total_duration: number; // in natural seconds
+  remain_duration: number; // in natural seconds;
+  speed: number; // in float gal/min
+  volume: number; // in float gal since last "is_watering" = "ON" (I THINK)
+  volume_limit: number; // not sure, just 0 in testing
+  failsafe_duration: number; // not sure, just 0 in testing
+}
+
 mqttClient.on("message", (topic, message) => {
   const topicParts = topic.split("/");
   if (topicParts[0] === "ESP32Env" && topicParts.length === 3) {
@@ -105,6 +150,18 @@ mqttClient.on("message", (topic, message) => {
   ) {
     const name = topicParts[1]!;
     logLineMetric(name, parseFloat(message.toString()));
+  }
+
+  if (
+    topicParts[0] === "homeassistant" &&
+    topicParts[1] === "linktap" &&
+    !topicParts[2]!.includes("_") &&
+    topicParts[3] === "state"
+  ) {
+    const parsed: LinkTapUpdate = JSON.parse(message.toString());
+    logWaterMetric("flow_in_gpm", parsed.speed);
+    logWaterMetric("battery_in_whole_percent", parsed.battery);
+    logWaterMetric("signal_in_whole_percent", parsed.signal);
   }
 });
 
@@ -148,6 +205,17 @@ setInterval(() => {
       getCurrentMetric(`mqtt_energy_${name}`).remove();
       lineMetricsList.splice(lineMetricsList.indexOf(name), 1);
       delete lastUpdate[`mqtt_energy_${name}`];
+    }
+  }
+
+  for (const name of [...waterMetricsList]) {
+    if (
+      new Date().getTime() - lastUpdate[`mqtt_water_${name}`]! >
+      WATCHDOG_INTERVAL
+    ) {
+      getWaterMetric(`mqtt_water_${name}`).remove();
+      waterMetricsList.splice(waterMetricsList.indexOf(name), 1);
+      delete lastUpdate[`mqtt_water_${name}`];
     }
   }
 }, WATCHDOG_INTERVAL);
