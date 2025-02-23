@@ -1,6 +1,10 @@
 import client from "prom-client";
 import http from "http";
 import mqtt from "mqtt";
+import { AddressInfo } from "net";
+import process from "process";
+
+const METRICS_PORT = parseInt(process.env["METRICS_PORT"] ?? "9100", 10);
 
 const metricsServer = http.createServer((__req, res) => {
   res.setHeader("Content-Type", client.register.contentType);
@@ -10,15 +14,28 @@ const metricsServer = http.createServer((__req, res) => {
   });
 });
 
-metricsServer.listen(8080, "0.0.0.0");
+metricsServer.on("listening", () => {
+  const address = metricsServer.address() as AddressInfo;
+  console.log(`metrics on ${address.address}:${address.port}`);
+});
 
-const mqttClient = mqtt.connect("mqtt://10.60.1.15:1883");
-mqttClient.subscribe("#"); // All
+metricsServer.listen(METRICS_PORT, "0.0.0.0");
 
-const metrics: { [guageKey: string]: client.Gauge<"room"> } = {};
-const currentMetrics: { [guageKey: string]: client.Gauge<"port"> } = {};
-const lineMetrics: { [guageKey: string]: client.Gauge } = {};
-const waterMetrics: { [guageKey: string]: client.Gauge } = {};
+const MQTT_HOST = process.env["MQTT_HOST"];
+const MQTT_PORT = process.env["MQTT_PORT"] ?? "1883";
+
+if (!MQTT_HOST) {
+  console.error("Env var MQTT_HOST is required");
+  process.exit(1);
+}
+
+const mqttClient = mqtt.connect(`mqtt://${MQTT_HOST}:${MQTT_PORT}`);
+mqttClient.subscribe("#"); // Subscribe to all topics
+
+const metrics: { [gaugeKey: string]: client.Gauge<"room"> } = {};
+const currentMetrics: { [gaugeKey: string]: client.Gauge<"port"> } = {};
+const lineMetrics: { [gaugeKey: string]: client.Gauge } = {};
+const waterMetrics: { [gaugeKey: string]: client.Gauge } = {};
 const metricRooms: [string, string][] = [];
 const currentMetricRooms: [string, string][] = [];
 const lineMetricsList: string[] = [];
